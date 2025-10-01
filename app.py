@@ -7,6 +7,8 @@ from openai import OpenAI
 import matplotlib.pyplot as plt
 import re
 import string
+import html 
+from db import get_budgets, set_budget
 
 # ========== INIT ==========
 init_db()
@@ -48,8 +50,7 @@ if apply_filters and not df.empty:
 st.sidebar.header("📊 Budget Tracker")
 
 # Persist budgets across reruns
-if "budgets" not in st.session_state:
-    st.session_state["budgets"] = {}
+budgets = get_budgets()
 
 # Expense-only categories
 EXPENSE_CATEGORIES = [
@@ -60,10 +61,10 @@ selected_category = st.sidebar.selectbox("Select category to set budget", EXPENS
 budget_amount = st.sidebar.number_input("Budget Amount", min_value=0, value=0, step=10)
 
 if st.sidebar.button("Set Budget"):
-    st.session_state["budgets"][selected_category] = float(budget_amount)
+    set_budget(selected_category, budget_amount)
     st.sidebar.success(f"Budget set for {selected_category}: ${budget_amount:.2f}")
+    budgets = get_budgets()  # reload from DB
 
-budgets = st.session_state["budgets"]
 
 # Budget progress (uses filtered_df)
 if not filtered_df.empty:
@@ -114,23 +115,18 @@ with st.container():
 # ========== TABLE + PIE ==========
 if not filtered_df.empty:
     st.subheader("📊 All Transactions")
-    st.dataframe(filtered_df)
 
-    st.subheader("📊 Finances by Category")
-    cat_totals = filtered_df.groupby("category")["amount"].sum()
-    fig, ax = plt.subplots(figsize=(6, 6), facecolor="none")
-    ax.pie(cat_totals, labels=None, autopct="%1.1f%%", startangle=90)
-    ax.axis("equal")
-    legend = ax.legend(
-        cat_totals.index,
-        title="Categories",
-        loc="center left",
-        bbox_to_anchor=(1, 0, 0.5, 1),
-        facecolor="black",
-        labelcolor="white"
-    )
-    plt.setp(legend.get_title(), color="white")
-    st.pyplot(fig)
+    # Preview mode
+    if not st.session_state.get("show_all_transactions", False):
+        preview_df = filtered_df.head(5)
+        st.dataframe(preview_df, use_container_width=True)
+        if len(filtered_df) > 5:
+            if st.button("View All Transactions"):
+                st.session_state["show_all_transactions"] = True
+    else:
+        st.dataframe(filtered_df, use_container_width=True)
+        if st.button("Show Less"):
+            st.session_state["show_all_transactions"] = False
 
 # ========== CHATBOT ==========
 st.subheader("🤖 Chatbot Assistant")
@@ -185,15 +181,16 @@ if user_query:
     if "budget" in user_query.lower():
         cat = detect_budget_category(user_query)
         if cat:
-            if cat in st.session_state.budgets:
+            if cat in budgets:
                 st.subheader("💡 Insight")
-                st.write(f"Your budget for {cat} is set at ${st.session_state.budgets[cat]:.2f}.")
+                st.write(f"Your budget for {cat} is set at ${budgets[cat]:.2f}.")
             else:
                 st.info(f"No budget set for {cat}.")
         else:
             st.info("I couldn't detect a category from your question. Try: 'What is my budget for shopping?'")
+
+    # 2) Otherwise, run the SQL path
     else:
-        # 2) Otherwise, run the SQL path
         context = f"""
         You are an assistant that converts natural language into SQL for a PostgreSQL transactions database.
         - The table schema is: transactions(id, date, merchant, amount, category, type).
@@ -211,7 +208,7 @@ if user_query:
         sql_query = response.choices[0].message.content.strip()
         sql_query = sql_query.replace("```sql", "").replace("```", "").strip()
 
-        # Common MySQL->Postgres fix (just in case)
+        # Fix MySQL-style dates → Postgres
         sql_query = sql_query.replace("CURDATE()", "CURRENT_DATE")
         sql_query = re.sub(r"DATE_SUB\(CURRENT_DATE,\s*INTERVAL\s*30\s*DAY\)",
                            "CURRENT_DATE - INTERVAL '30 days'", sql_query, flags=re.I)
@@ -235,10 +232,15 @@ if user_query:
                         messages=[{"role": "user", "content": summary_prompt}]
                     )
                     ai_summary = summary_response.choices[0].message.content.strip()
-                    ai_summary = re.sub(r"[*_]+", " ", ai_summary)
-                    ai_summary = re.sub(r"\s+", " ", ai_summary).strip()
+
+                    # ✅ Cleanup
+                    ai_summary = summary_response.choices[0].message.content.strip()
+                    ai_summary = re.sub(r"[*_]+", " ", ai_summary)   # remove stray markdown
+                    ai_summary = re.sub(r"\s+", " ", ai_summary).strip()  # fix spacing
+                    
+
                     st.subheader("💡 Insight")
-                    st.write(ai_summary)
+                    st.markdown(f"<pre>{html.escape(ai_summary)}</pre>", unsafe_allow_html=True)
                 else:
                     st.info("ℹ️ No results found for your query.")
             except Exception as e:
