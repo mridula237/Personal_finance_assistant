@@ -34,6 +34,24 @@ def init_db():
         );
         """))
 
+        # Users table
+        conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS users (
+            id SERIAL PRIMARY KEY,
+            username VARCHAR(150) UNIQUE NOT NULL,
+            password VARCHAR(255) NOT NULL
+        );
+        """))
+
+        # Sessions table
+        conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS sessions (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+            session_token VARCHAR(255) UNIQUE NOT NULL
+        );
+        """))
+
         # Migration check: ensure `type` column exists
         result = conn.execute(text("""
             SELECT column_name 
@@ -97,3 +115,48 @@ def get_budgets():
     with engine.begin() as conn:
         result = conn.execute(text("SELECT category, amount FROM budgets"))
         return {row[0]: float(row[1]) for row in result}
+
+# ================= USERS =================
+def register_user(username, password_hash):
+    """Register a new user with hashed password."""
+    with engine.begin() as conn:
+        conn.execute(
+            text("INSERT INTO users (username, password) VALUES (:u, :p)"),
+            {"u": username, "p": password_hash}
+        )
+
+def get_user(username):
+    """Fetch a user by username."""
+    with engine.begin() as conn:
+        result = conn.execute(
+            text("SELECT * FROM users WHERE username = :u"),
+            {"u": username}
+        ).fetchone()
+        return dict(result._mapping) if result else None
+
+# ================= SESSIONS =================
+def create_session(user_id, token):
+    """Create a session for a user."""
+    with engine.begin() as conn:
+        conn.execute(
+            text("INSERT INTO sessions (user_id, session_token) VALUES (:uid, :tok)"),
+            {"uid": user_id, "tok": token}
+        )
+
+def get_user_by_session(token):
+    """Retrieve user details from a session token."""
+    with engine.begin() as conn:
+        result = conn.execute(
+            text("""
+                SELECT u.* FROM users u
+                JOIN sessions s ON u.id = s.user_id
+                WHERE s.session_token = :tok
+            """),
+            {"tok": token}
+        ).fetchone()
+        return dict(result._mapping) if result else None
+
+def delete_session(token):
+    """Delete a session (logout)."""
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM sessions WHERE session_token = :tok"), {"tok": token})

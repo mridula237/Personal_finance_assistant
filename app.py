@@ -1,17 +1,93 @@
 import streamlit as st
 import pandas as pd
 from sqlalchemy import text
-from db import init_db, add_transaction, get_transactions, engine
+from db import (
+    init_db, add_transaction, get_transactions, engine,
+    get_budgets, set_budget,
+    register_user, get_user, create_session, get_user_by_session, delete_session
+)
 import os
 from openai import OpenAI
 import matplotlib.pyplot as plt
 import re
 import string
 import html 
-from db import get_budgets, set_budget
+import uuid
+import bcrypt
+from streamlit_cookies_manager import EncryptedCookieManager
 
 # ========== INIT ==========
 init_db()
+
+# ========== COOKIE MANAGER ==========
+cookies = EncryptedCookieManager(prefix="finance_", password=os.getenv("COOKIE_SECRET", "supersecret"))
+if not cookies.ready():
+    st.stop()
+
+# ========== AUTH HELPERS ==========
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+def verify_password(password: str, hashed: str) -> bool:
+    return bcrypt.checkpw(password.encode("utf-8"), hashed.encode("utf-8"))
+
+def login_screen():
+    st.title("🔑 Login / Register")
+
+    tab1, tab2 = st.tabs(["Login", "Register"])
+
+    with tab1:
+        username = st.text_input("Username", key="login_user")
+        password = st.text_input("Password", type="password", key="login_pass")
+        if st.button("Login"):
+            user = get_user(username)
+            if user and verify_password(password, user["password"]):
+                token = str(uuid.uuid4())
+                create_session(user["id"], token)
+                st.session_state["session_token"] = token
+                cookies["session_token"] = token
+                cookies.save()
+                st.rerun()
+            else:
+                st.error("❌ Invalid username or password")
+
+    with tab2:
+        new_username = st.text_input("Choose Username", key="reg_user")
+        new_password = st.text_input("Choose Password", type="password", key="reg_pass")
+        if st.button("Register"):
+            if get_user(new_username):
+                st.error("⚠️ Username already exists")
+            else:
+                register_user(new_username, hash_password(new_password))
+                st.success("✅ Registered successfully! Please login.")
+
+def get_current_user():
+    token = st.session_state.get("session_token") or cookies.get("session_token")
+    if not token:
+        return None
+    return get_user_by_session(token)
+
+def logout():
+    token = st.session_state.get("session_token") or cookies.get("session_token")
+    if token:
+        delete_session(token)
+    st.session_state.pop("session_token", None)
+    cookies["session_token"] = ""
+    cookies.save()
+    st.rerun()
+
+# ========== APP ENTRY ==========
+user = get_current_user()
+if not user:
+    login_screen()
+    st.stop()
+
+# ===== If logged in, show dashboard =====
+st.sidebar.write(f"👋 Welcome, **{user['username']}**")
+if st.sidebar.button("Logout"):
+    logout()
+
+# ---------------- EXISTING APP CODE STARTS BELOW ----------------
 
 def is_safe_sql(sql: str) -> bool:
     sql_lower = sql.lower().strip()
@@ -20,9 +96,9 @@ def is_safe_sql(sql: str) -> bool:
     dangerous = ["drop", "delete", "alter", "insert", "update", "truncate"]
     return not any(word in sql_lower for word in dangerous)
 
-st.title("💰 Personal Finance Assistant")
+st.title(" Personal Finance Assistant")
 
-# ========== FILTERS (must come first) ==========
+# ========== FILTERS ==========
 st.sidebar.header("🔍 Filters")
 start_date = st.sidebar.date_input("Start Date")
 end_date = st.sidebar.date_input("End Date")
@@ -32,7 +108,7 @@ filter_categories = st.sidebar.multiselect(
 )
 apply_filters = st.sidebar.button("Apply Filters")
 
-# Fetch transactions and apply filters -> filtered_df
+# Fetch transactions and apply filters
 transactions = get_transactions()
 df = pd.DataFrame(transactions) if transactions else pd.DataFrame()
 
@@ -48,14 +124,9 @@ if apply_filters and not df.empty:
 
 # ========== BUDGET TRACKER ==========
 st.sidebar.header("📊 Budget Tracker")
-
-# Persist budgets across reruns
 budgets = get_budgets()
 
-# Expense-only categories
-EXPENSE_CATEGORIES = [
-    "Food & Drinks", "Travel", "Subscriptions", "Shopping", "Rent/Mortgage", "Other"
-]
+EXPENSE_CATEGORIES = ["Food & Drinks", "Travel", "Subscriptions", "Shopping", "Rent/Mortgage", "Other"]
 
 selected_category = st.sidebar.selectbox("Select category to set budget", EXPENSE_CATEGORIES)
 budget_amount = st.sidebar.number_input("Budget Amount", min_value=0, value=0, step=10)
@@ -63,10 +134,8 @@ budget_amount = st.sidebar.number_input("Budget Amount", min_value=0, value=0, s
 if st.sidebar.button("Set Budget"):
     set_budget(selected_category, budget_amount)
     st.sidebar.success(f"Budget set for {selected_category}: ${budget_amount:.2f}")
-    budgets = get_budgets()  # reload from DB
+    budgets = get_budgets()
 
-
-# Budget progress (uses filtered_df)
 if not filtered_df.empty:
     monthly_totals = filtered_df.groupby("category")["amount"].sum()
     for category, budget in budgets.items():
@@ -115,8 +184,6 @@ with st.container():
 # ========== TABLE + PIE ==========
 if not filtered_df.empty:
     st.subheader("📊 All Transactions")
-
-    # Preview mode
     if not st.session_state.get("show_all_transactions", False):
         preview_df = filtered_df.head(5)
         st.dataframe(preview_df, use_container_width=True)
@@ -152,7 +219,6 @@ for i, q in enumerate(preset_queries):
 
 user_query = st.text_input("Or type your own question:", value=st.session_state.get("user_query", ""))
 
-# ---- budget NLU helpers ----
 ALIAS_MAP = {
     "Food & Drinks": ["food & drinks", "food and drinks", "food", "groceries"],
     "Travel": ["travel", "trip", "flights", "tickets"],
@@ -177,7 +243,6 @@ def detect_budget_category(q: str):
     return None
 
 if user_query:
-    # 1) Answer BUDGET questions directly (no SQL)
     if "budget" in user_query.lower():
         cat = detect_budget_category(user_query)
         if cat:
@@ -188,8 +253,6 @@ if user_query:
                 st.info(f"No budget set for {cat}.")
         else:
             st.info("I couldn't detect a category from your question. Try: 'What is my budget for shopping?'")
-
-    # 2) Otherwise, run the SQL path
     else:
         context = f"""
         You are an assistant that converts natural language into SQL for a PostgreSQL transactions database.
@@ -207,12 +270,9 @@ if user_query:
         )
         sql_query = response.choices[0].message.content.strip()
         sql_query = sql_query.replace("```sql", "").replace("```", "").strip()
-
-        # Fix MySQL-style dates → Postgres
         sql_query = sql_query.replace("CURDATE()", "CURRENT_DATE")
         sql_query = re.sub(r"DATE_SUB\(CURRENT_DATE,\s*INTERVAL\s*30\s*DAY\)",
                            "CURRENT_DATE - INTERVAL '30 days'", sql_query, flags=re.I)
-
         if not is_safe_sql(sql_query):
             st.error("⚠️ Unsafe query detected! Only SELECT statements are allowed.")
         else:
@@ -232,13 +292,8 @@ if user_query:
                         messages=[{"role": "user", "content": summary_prompt}]
                     )
                     ai_summary = summary_response.choices[0].message.content.strip()
-
-                    # ✅ Cleanup
-                    ai_summary = summary_response.choices[0].message.content.strip()
-                    ai_summary = re.sub(r"[*_]+", " ", ai_summary)   # remove stray markdown
-                    ai_summary = re.sub(r"\s+", " ", ai_summary).strip()  # fix spacing
-                    
-
+                    ai_summary = re.sub(r"[*_]+", " ", ai_summary)
+                    ai_summary = re.sub(r"\s+", " ", ai_summary).strip()
                     st.subheader("💡 Insight")
                     st.markdown(f"<pre>{html.escape(ai_summary)}</pre>", unsafe_allow_html=True)
                 else:
