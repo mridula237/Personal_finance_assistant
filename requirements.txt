@@ -6,3 +6,7 @@ scikit-learn
 prophet
 openai
 python-dotenv
+sqlalchemy
+psycopg2-binary
+bcrypt
+streamlit-cookies-manager
