@@ -28,13 +28,14 @@ It helps you track expenses, set budgets, split bills with friends (Splitwise-st
 ---
 
 ## 📂 Project Structure
+```
 Personal_Finance_Assistant/
 ├── app.py # Main Streamlit app
 ├── db.py # Database models & queries
 ├── requirements.txt # Python dependencies
 ├── README.md # Project documentation
 └── .env.example # Environment variable template
-
+```
 ## ⚙️ Setup & Installation
 
 1. **Clone the repo**
