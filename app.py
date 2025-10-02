@@ -96,7 +96,7 @@ start_date = st.sidebar.date_input("Start Date")
 end_date = st.sidebar.date_input("End Date")
 filter_categories = st.sidebar.multiselect(
     "Category Filter",
-    ["Food & Drinks", "Travel", "Subscriptions", "Shopping", "Rent/Mortgage", "Salary", "Other"]
+    ["Food & Drinks", "Travel", "Subscriptions", "Shopping", "Rent/Bills", "Salary", "Other"]
 )
 apply_filters = st.sidebar.button("Apply Filters")
 
@@ -146,7 +146,7 @@ with tab1:
             t_type = st.selectbox("Type", ["Expense", "Income"], key="txn_type")
             t_category = st.selectbox(
                 "Category",
-                ["Food & Drinks", "Travel", "Subscriptions", "Shopping", "Rent/Mortgage", "Salary", "Other"],key="txn_category"
+                ["Food & Drinks", "Travel", "Subscriptions", "Shopping", "Rent/Bills", "Salary", "Other"],key="txn_category"
             )
         if st.button("Add Transaction", use_container_width=True):
             add_transaction(user["id"], t_date, t_merchant, t_amount, t_category, t_type)
@@ -216,7 +216,7 @@ with tab2:
 with tab3:
     st.subheader("💰 Budgets")
     budgets = get_budgets(user["id"])
-    EXPENSE_CATEGORIES = ["Food & Drinks", "Travel", "Subscriptions", "Shopping", "Rent/Mortgage", "Other"]
+    EXPENSE_CATEGORIES = ["Food & Drinks", "Travel", "Subscriptions", "Shopping", "Rent/Bills", "Other"]
 
     selected_category = st.selectbox("Select category to set budget", EXPENSE_CATEGORIES)
     budget_amount = st.number_input("Budget Amount", min_value=0, value=0, step=10)
@@ -306,7 +306,7 @@ with tab5:
         "Travel": ["travel", "trip", "flights", "tickets"],
         "Subscriptions": ["subscriptions", "subs", "netflix", "spotify", "apple", "prime"],
         "Shopping": ["shopping", "amazon", "clothes", "apparel"],
-        "Rent/Mortgage": ["rent", "mortgage", "house payment"],
+        "Rent/Bills": ["rent", "bills", "house payment"],
         "Other": ["other", "misc", "miscellaneous"]
     }
 
