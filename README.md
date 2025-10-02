@@ -39,9 +39,10 @@ Personal_Finance_Assistant/
 ## ⚙️ Setup & Installation
 
 1. **Clone the repo**
-   ```bash
-   git clone https://github.com/yourusername/Personal_Finance_Assistant.git
-   cd Personal_Finance_Assistant
+```
+git clone https://github.com/yourusername/Personal_Finance_Assistant.git
+cd Personal_Finance_Assistant
+```
 2. **Create a virtual environment**
 ```
 python -m venv venv
