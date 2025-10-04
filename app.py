@@ -2,26 +2,30 @@ import streamlit as st
 import pandas as pd
 from sqlalchemy import text
 from db import (
-    init_db, add_transaction, get_transactions, engine,
+    init_db, init_reset_tokens_table,
+    add_transaction, get_transactions, engine,
     get_budgets, set_budget,
-    register_user, get_user, create_session, get_user_by_session, delete_session,
-    init_friends_table, send_friend_request, get_friend_requests, accept_friend_request,
-    get_friends, get_user_by_id,settle_split, add_split, get_splits
+    register_user, get_user, get_user_by_email,
+    create_session, get_user_by_session, delete_session,
+    send_friend_request, get_friend_requests, accept_friend_request,
+    get_friends, get_user_by_id, settle_split, add_split, get_splits,
+    get_user_by_token, create_reset_token, delete_token
 )
 import os
 from openai import OpenAI
 import matplotlib.pyplot as plt
-import re
-import string
-import html 
-import uuid
-import bcrypt
+import re, string, html, uuid, bcrypt, secrets, smtplib
+from email.mime.text import MIMEText
 from streamlit_cookies_manager import EncryptedCookieManager
 
+# ========== CACHE DB INIT ==========
+@st.cache_resource
+def setup_database():
+    init_db()
+    init_reset_tokens_table()
+    return True
 
-# ========== INIT ==========
-init_db()
-init_friends_table()
+setup_database()
 
 # ========== COOKIE MANAGER ==========
 cookies = EncryptedCookieManager(prefix="finance_", password=os.getenv("COOKIE_SECRET", "supersecret"))
@@ -35,36 +39,152 @@ def hash_password(password: str) -> str:
 def verify_password(password: str, hashed: str) -> bool:
     return bcrypt.checkpw(password.encode("utf-8"), hashed.encode("utf-8"))
 
+# ---------- SEND EMAIL HELPER ----------
+def send_reset_email(to_email, reset_link):
+    try:
+        msg = MIMEText(f"Click here to reset your password: {reset_link}")
+        msg["Subject"] = "Password Reset"
+        msg["From"] = os.getenv("SMTP_FROM")
+        msg["To"] = to_email
+
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(os.getenv("SMTP_USER"), os.getenv("SMTP_PASS"))
+            server.send_message(msg)
+
+    except Exception as e:
+        st.warning(f"⚠️ Could not send email. (Dev Mode link below)\n\nError: {e}")
+
+# ---------- RESET PASSWORD SCREENS ----------
+def reset_request_screen():
+    st.title("🔑 Forgot Password")
+
+    email = st.text_input("Enter your registered email")
+    if st.button("Send Reset Link"):
+        user = get_user_by_email(email)
+        if not user:
+            st.error("❌ Email not found")
+        else:
+            token = secrets.token_urlsafe(32)
+            create_reset_token(user["id"], token)
+
+            # NOTE: Replace with your deployed domain when live
+            reset_link = f"http://localhost:8501/?token={token}"
+            send_reset_email(email, reset_link)
+
+            st.success("✅ Password reset link sent to your email.")
+            st.info(f"(Dev Mode) Reset link: {reset_link}")  # remove in prod
+
+def reset_password_screen(token):
+    st.title("🔄 Reset Password")
+
+    user_id = get_user_by_token(token)
+    if not user_id:
+        st.error("❌ Invalid or expired reset link")
+        return
+
+    new_password = st.text_input("New Password", type="password")
+    confirm_password = st.text_input("Confirm Password", type="password")
+
+    if st.button("Reset Password"):
+        if new_password != confirm_password:
+            st.error("❌ Passwords do not match")
+        else:
+            hashed_pw = hash_password(new_password)
+            with engine.begin() as conn:
+                conn.execute(
+                    text("UPDATE users SET password = :p WHERE id = :uid"),
+                    {"p": hashed_pw, "uid": user_id}
+                )
+            delete_token(token)
+
+            # ✅ Clear query params safely
+            st.query_params.clear()
+
+            # ✅ Rewrite URL (so ?token disappears)
+            st.markdown(
+                """
+                <script>
+                window.history.replaceState({}, document.title, window.location.pathname);
+                </script>
+                """,
+                unsafe_allow_html=True
+            )
+
+            st.success("✅ Password reset successfully! Please login.")
+
+            # ✅ Reset session flags
+            st.session_state["show_reset_request"] = False
+            st.session_state["password_reset_done"] = True
+
+            # ✅ Stop execution cleanly, return to login
+            st.stop()
+
+
+# ---------- LOGIN SCREEN ----------
 def login_screen():
     st.title("🔑 Login / Register")
 
+    # Handle Forgot Password flow
+    if st.session_state.get("show_reset_request", False):
+        reset_request_screen()
+        return
+
+    # Handle token from query params
+    qp = st.query_params
+    token = None
+    try:
+        token = qp.get("token", None)
+    except Exception:
+        # Older versions may behave differently
+        token = None
+
+    if token:
+        # If token is list-like in some versions, normalize
+        if isinstance(token, list):
+            token = token[0]
+        reset_password_screen(token)
+        return
+
     tab1, tab2 = st.tabs(["Login", "Register"])
 
+    # ---- Login Tab ----
     with tab1:
         username = st.text_input("Username", key="login_user")
         password = st.text_input("Password", type="password", key="login_pass")
-        if st.button("Login"):
-            user = get_user(username)
-            if user and verify_password(password, user["password"]):
-                token = str(uuid.uuid4())
-                create_session(user["id"], token)
-                st.session_state["session_token"] = token
-                cookies["session_token"] = token
-                cookies.save()
-                st.rerun()
-            else:
-                st.error("❌ Invalid username or password")
 
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            if st.button("Login", use_container_width=True):
+                user = get_user(username)
+                if user and verify_password(password, user["password"]):
+                    token = str(uuid.uuid4())
+                    create_session(user["id"], token)
+                    st.session_state["session_token"] = token
+                    cookies["session_token"] = token
+                    cookies.save()
+                    st.rerun()
+                else:
+                    st.error("❌ Invalid username or password")
+
+        with col2:
+            if st.button("Forgot Password?", use_container_width=True):
+                st.session_state["show_reset_request"] = True
+                st.rerun()
+
+    # ---- Register Tab ----
     with tab2:
         new_username = st.text_input("Choose Username", key="reg_user")
+        new_email = st.text_input("Enter Email", key="reg_email")
         new_password = st.text_input("Choose Password", type="password", key="reg_pass")
+
         if st.button("Register"):
             if get_user(new_username):
                 st.error("⚠️ Username already exists")
             else:
-                register_user(new_username, hash_password(new_password))
+                register_user(new_username, hash_password(new_password), new_email)
                 st.success("✅ Registered successfully! Please login.")
 
+# ---------- SESSION HELPERS ----------
 def get_current_user():
     token = st.session_state.get("session_token") or cookies.get("session_token")
     if not token:
@@ -129,46 +249,13 @@ for category, budget in budgets.items():
         st.sidebar.error(f"⚠️ Over budget in {category}: ${spent - budget:.2f}")
 
 # ---- Tabs Layout ----
-tab1, tab2, tab3, tab4, tab5, tab6= st.tabs(
-    ["📑 Transactions", "📈 Summary", "💰 Budgets", "👥 Friends", "🤖 Chatbot","💸 Splits"]
+tab1, tab3, tab4, tab5, tab6= st.tabs(
+    ["📑 Transactions", "💰 Budgets", "👥 Friends", "🤖 Chatbot","💸 Splits"]
 )
 
 # ===================== TRANSACTIONS TAB =====================
 with tab1:
-    st.subheader("➕ Add Transaction")
-    with st.container():
-        col1, col2 = st.columns(2)
-        with col1:
-            t_date = st.date_input("Date")
-            t_merchant = st.text_input("Merchant")
-        with col2:
-            t_amount = st.number_input("Amount", min_value=0.0, step=0.01,key="txn_amount")
-            t_type = st.selectbox("Type", ["Expense", "Income"], key="txn_type")
-            t_category = st.selectbox(
-                "Category",
-                ["Food & Drinks", "Travel", "Subscriptions", "Shopping", "Rent/Bills", "Salary", "Other"],key="txn_category"
-            )
-        if st.button("Add Transaction", use_container_width=True):
-            add_transaction(user["id"], t_date, t_merchant, t_amount, t_category, t_type)
-            st.success("✅ Transaction added!")
-
-    # Show transactions table
-    if not filtered_df.empty:
-        st.subheader("📊 All Transactions")
-        if not st.session_state.get("show_all_transactions", False):
-            preview_df = filtered_df.head(5)
-            st.dataframe(preview_df, use_container_width=True)
-            if len(filtered_df) > 5:
-                if st.button("View All Transactions"):
-                    st.session_state["show_all_transactions"] = True
-        else:
-            st.dataframe(filtered_df, use_container_width=True)
-            if st.button("Show Less"):
-                st.session_state["show_all_transactions"] = False
-
-
-# ===================== SUMMARY TAB =====================
-with tab2:
+    # ---- Summary FIRST ----
     st.subheader("💵 Summary")
     if not filtered_df.empty:
         total_income = float(filtered_df.loc[filtered_df["type"] == "Income", "amount"].sum())
@@ -182,34 +269,40 @@ with tab2:
     c2.metric("Total Expenses", f"${total_expenses:,.2f}")
     c3.metric("Balance", f"${total_balance:,.2f}")
 
-    # Pie chart for categories
-    st.subheader("📊 Finances by Category")
+    st.markdown("---")  # separator
+
+    # ---- Add Transaction Form ----
+    st.subheader("➕ Add Transaction")
+    with st.container():
+        col1, col2 = st.columns(2)
+        with col1:
+            t_date = st.date_input("Date")
+            t_merchant = st.text_input("Merchant")
+        with col2:
+            t_amount = st.number_input("Amount", min_value=0.0, step=0.01, key="txn_amount")
+            t_type = st.selectbox("Type", ["Expense", "Income"], key="txn_type")
+            t_category = st.selectbox(
+                "Category",
+                ["Food & Drinks", "Travel", "Subscriptions", "Shopping", "Rent/Bills", "Salary", "Other"],
+                key="txn_category"
+            )
+        if st.button("Add Transaction", use_container_width=True):
+            add_transaction(user["id"], t_date, t_merchant, t_amount, t_category, t_type)
+            st.success("✅ Transaction added!")
+
+    # ---- Show Transactions Table ----
     if not filtered_df.empty:
-        category_totals = filtered_df.groupby("category")["amount"].sum()
-
-        fig, ax = plt.subplots(facecolor="none")   # ✅ transparent figure
-        ax.set_facecolor("none")                   # ✅ transparent axes
-        
-        wedges, texts, autotexts = ax.pie(
-            category_totals,
-            labels=None,                           # ✅ remove labels from inside chart
-            autopct="%1.1f%%",
-            startangle=90
-        )
-
-        # ✅ Add legend (outside chart)
-        ax.legend(
-            wedges,
-            category_totals.index,
-            title="Categories",
-            loc="center left",
-            bbox_to_anchor=(1, 0, 0.5, 1)          # moves legend to right side
-        )
-
-        ax.axis("equal")  # Equal aspect ratio keeps pie circular
-        st.pyplot(fig, transparent=True)
-    else:
-        st.info("No data available to show chart.")
+        st.subheader("📊 All Transactions")
+        if not st.session_state.get("show_all_transactions", False):
+            preview_df = filtered_df.head(5)
+            st.dataframe(preview_df, use_container_width=True)
+            if len(filtered_df) > 5:
+                if st.button("View All Transactions"):
+                    st.session_state["show_all_transactions"] = True
+        else:
+            st.dataframe(filtered_df, use_container_width=True)
+            if st.button("Show Less"):
+                st.session_state["show_all_transactions"] = False
 
 
 # ===================== BUDGET TAB =====================
@@ -238,7 +331,6 @@ with tab3:
                 st.error(f"⚠️ Over budget by ${-remaining:.2f}")
             else:
                 st.success(f"✅ ${remaining:.2f} remaining")
-
 
 # ===================== FRIENDS TAB =====================
 with tab4:
@@ -275,7 +367,7 @@ with tab4:
         else:
             st.info("No friends yet.")
 
-
+# ===================== CHATBOT TAB =====================
 # ===================== CHATBOT TAB =====================
 with tab5:
     st.subheader("🤖 Chatbot Assistant")
@@ -354,14 +446,40 @@ with tab5:
             sql_query = response.choices[0].message.content.strip()
             sql_query = sql_query.replace("```sql", "").replace("```", "").strip()
             sql_query = sql_query.replace("CURDATE()", "CURRENT_DATE")
-            sql_query = re.sub(r"DATE_SUB\(CURRENT_DATE,\s*INTERVAL\s*30\s*DAY\)",
-                            "CURRENT_DATE - INTERVAL '30 days'", sql_query, flags=re.I)
+            sql_query = re.sub(
+                r"DATE_SUB\(CURRENT_DATE,\s*INTERVAL\s*30\s*DAY\)",
+                "CURRENT_DATE - INTERVAL '30 days'",
+                sql_query,
+                flags=re.I
+            )
 
-            # ✅ inject user_id automatically
+            # ✅ inject user_id safely
             if "where" in sql_query.lower():
-                sql_query = re.sub(r"(?i)where", f"WHERE user_id = {user['id']} AND ", sql_query, count=1)
+                sql_query = re.sub(
+                    r"(?i)where",
+                    f"WHERE user_id = {user['id']} AND ",
+                    sql_query,
+                    count=1
+                )
             else:
-                sql_query = sql_query.rstrip(";") + f" WHERE user_id = {user['id']};"
+                # Look for ORDER BY or LIMIT, insert WHERE before them
+                insert_pos = len(sql_query)
+                for keyword in ["order by", "limit"]:
+                    match = re.search(rf"(?i){keyword}", sql_query)
+                    if match:
+                        insert_pos = match.start()
+                        break
+                sql_query = (
+                    sql_query[:insert_pos].rstrip() +
+                    f" WHERE user_id = {user['id']} " +
+                    sql_query[insert_pos:]
+                )
+
+            # ✅ Patch missing GROUP BY if aggregate is used
+            if re.search(r"SUM\(|AVG\(|COUNT\(", sql_query, re.I):
+                if "group by" not in sql_query.lower():
+                    if "category" in sql_query.lower():
+                        sql_query += " GROUP BY category"
 
             if not sql_query.lower().startswith("select"):
                 st.error("⚠️ Unsafe query detected! Only SELECT statements are allowed.")
@@ -372,7 +490,7 @@ with tab5:
                     if rows:
                         df_result = pd.DataFrame(rows)
 
-                        # ✅ Force assistant to summarize with categories + amounts
+                        # ✅ Summarize results in plain English
                         summary_prompt = f"""
                         You are a financial assistant. Based on these SQL query results,
                         explain the answer to the user's question in plain English.
@@ -401,6 +519,8 @@ with tab5:
                 except Exception as e:
                     st.error(f"⚠️ Could not process query. Please try rephrasing.\n\nError: {e}")
 
+
+
 # ===================== SPLITS SECTION =====================
 with tab6:    
     st.subheader("💸 Splits")
@@ -417,7 +537,7 @@ with tab6:
         friend_map = {name: fid for fid, name in [(fid, uname) for fid, uname in friend_options]}
         selected_friend = st.selectbox("Select Friend", [uname for _, uname in friend_options])
 
-        amount = st.number_input("Amount", min_value=0.0, step=0.01,key="split_amount")
+        amount = st.number_input("Amount", min_value=0.0, step=0.01, key="split_amount")
         description = st.text_input("Description", key="split_description")
 
         if st.button("Add Split"):
@@ -439,4 +559,3 @@ with tab6:
             if st.button(f"Settle Split {s['id']}", key=f"settle_{s['id']}"):
                 settle_split(s["id"])
                 st.success("✅ Split settled!")
-

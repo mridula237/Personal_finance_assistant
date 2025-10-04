@@ -1,6 +1,7 @@
 import os
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
+import datetime
 
 # Load environment variables
 load_dotenv()
@@ -11,8 +12,25 @@ engine = create_engine(DATABASE_URL, echo=False, future=True)
 
 # ================= INIT =================
 def init_db():
-    """Initialize the database and ensure schema is up-to-date."""
     with engine.begin() as conn:
+        # Ensure users table exists
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS users (
+                id SERIAL PRIMARY KEY,
+                username VARCHAR(150) UNIQUE NOT NULL,
+                password VARCHAR(255) NOT NULL
+            );
+        """))
+
+        # ✅ Ensure email column exists
+        result = conn.execute(text("""
+            SELECT column_name FROM information_schema.columns 
+            WHERE table_name='users' AND column_name='email';
+        """)).fetchone()
+
+        if not result:
+            conn.execute(text("ALTER TABLE users ADD COLUMN email VARCHAR(255) UNIQUE;"))
+
         # Transactions table
         conn.execute(text("""
     CREATE TABLE IF NOT EXISTS transactions (
@@ -26,7 +44,6 @@ def init_db():
     );
 """))
 
-
         # Budgets table
         conn.execute(text("""
     CREATE TABLE IF NOT EXISTS budgets (
@@ -38,21 +55,44 @@ def init_db():
     );
 """))
 
-        # Users table
-        conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS users (
-            id SERIAL PRIMARY KEY,
-            username VARCHAR(150) UNIQUE NOT NULL,
-            password VARCHAR(255) NOT NULL
-        );
-        """))
-
         # Sessions table
         conn.execute(text("""
         CREATE TABLE IF NOT EXISTS sessions (
             id SERIAL PRIMARY KEY,
             user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
             session_token VARCHAR(255) UNIQUE NOT NULL
+        );
+        """))
+
+        # Reset tokens table
+        conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS reset_tokens (
+            id SERIAL PRIMARY KEY,
+            user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            token VARCHAR(255) UNIQUE NOT NULL,
+            expires_at TIMESTAMP NOT NULL
+        );
+        """))
+
+        # Splits table
+        conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS splits (
+            id SERIAL PRIMARY KEY,
+            user_id INT REFERENCES users(id) ON DELETE CASCADE,
+            friend_id INT REFERENCES users(id) ON DELETE CASCADE,
+            amount NUMERIC NOT NULL,
+            description VARCHAR(255),
+            status VARCHAR(20) DEFAULT 'pending'
+        );
+        """))
+
+        # Friends table
+        conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS friends (
+            id SERIAL PRIMARY KEY,
+            user_id INT NOT NULL,
+            friend_id INT NOT NULL,
+            status VARCHAR(20) DEFAULT 'pending'
         );
         """))
 
@@ -70,28 +110,20 @@ def init_db():
                 ADD COLUMN type VARCHAR(50) DEFAULT 'Expense';
             """))
 
+
 # ================= TRANSACTIONS =================
 def add_transaction(user_id, date, merchant, amount, category, txn_type):
-    """Insert a new transaction linked to a specific user."""
     with engine.begin() as conn:
         conn.execute(
             text("""
                 INSERT INTO transactions (user_id, date, merchant, amount, category, type)
                 VALUES (:user_id, :date, :merchant, :amount, :category, :type)
             """),
-            {
-                "user_id": user_id,
-                "date": date,
-                "merchant": merchant,
-                "amount": amount,
-                "category": category,
-                "type": txn_type
-            }
+            {"user_id": user_id, "date": date, "merchant": merchant,
+             "amount": amount, "category": category, "type": txn_type}
         )
 
-
 def get_transactions(user_id):
-    """Fetch all transactions for a given user."""
     with engine.begin() as conn:
         result = conn.execute(
             text("SELECT * FROM transactions WHERE user_id = :uid ORDER BY date DESC"),
@@ -119,7 +151,6 @@ def set_budget(user_id, category, amount):
                 {"uid": user_id, "cat": category, "amt": amount}
             )
 
-
 def get_budgets(user_id):
     with engine.begin() as conn:
         result = conn.execute(
@@ -130,16 +161,15 @@ def get_budgets(user_id):
 
 
 # ================= USERS =================
-def register_user(username, password_hash):
-    """Register a new user with hashed password."""
+def register_user(username, password_hash, email):
+    """Register a new user with hashed password and email."""
     with engine.begin() as conn:
         conn.execute(
-            text("INSERT INTO users (username, password) VALUES (:u, :p)"),
-            {"u": username, "p": password_hash}
+            text("INSERT INTO users (username, password, email) VALUES (:u, :p, :e)"),
+            {"u": username, "p": password_hash, "e": email}
         )
 
 def get_user(username):
-    """Fetch a user by username."""
     with engine.begin() as conn:
         result = conn.execute(
             text("SELECT * FROM users WHERE username = :u"),
@@ -147,9 +177,19 @@ def get_user(username):
         ).fetchone()
         return dict(result._mapping) if result else None
 
+def get_user_by_email(email):
+    """Fetch a user by email."""
+    with engine.begin() as conn:
+        result = conn.execute(
+            text("SELECT * FROM users WHERE email = :e"),
+            {"e": email}
+        ).fetchone()
+        return dict(result._mapping) if result else None
+
+
+
 # ================= SESSIONS =================
 def create_session(user_id, token):
-    """Create a session for a user."""
     with engine.begin() as conn:
         conn.execute(
             text("INSERT INTO sessions (user_id, session_token) VALUES (:uid, :tok)"),
@@ -157,7 +197,6 @@ def create_session(user_id, token):
         )
 
 def get_user_by_session(token):
-    """Retrieve user details from a session token."""
     with engine.begin() as conn:
         result = conn.execute(
             text("""
@@ -170,21 +209,11 @@ def get_user_by_session(token):
         return dict(result._mapping) if result else None
 
 def delete_session(token):
-    """Delete a session (logout)."""
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM sessions WHERE session_token = :tok"), {"tok": token})
-        # ================= FRIENDS =================
-def init_friends_table():
-    with engine.begin() as conn:
-        conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS friends (
-            id SERIAL PRIMARY KEY,
-            user_id INT NOT NULL,
-            friend_id INT NOT NULL,
-            status VARCHAR(20) DEFAULT 'pending'
-        );
-        """))
 
+
+# ================= FRIENDS =================
 def send_friend_request(user_id, friend_id):
     with engine.begin() as conn:
         conn.execute(text("""
@@ -202,9 +231,8 @@ def get_friend_requests(user_id):
 
 def accept_friend_request(request_id):
     with engine.begin() as conn:
-        conn.execute(text("""
-            UPDATE friends SET status = 'accepted' WHERE id = :rid
-        """), {"rid": request_id})
+        conn.execute(text("UPDATE friends SET status = 'accepted' WHERE id = :rid"),
+                     {"rid": request_id})
 
 def get_friends(user_id):
     with engine.begin() as conn:
@@ -216,26 +244,13 @@ def get_friends(user_id):
 
 def get_user_by_id(user_id):
     with engine.begin() as conn:
-        result = conn.execute(text("SELECT * FROM users WHERE id = :uid"), {"uid": user_id}).fetchone()
+        result = conn.execute(text("SELECT * FROM users WHERE id = :uid"),
+                              {"uid": user_id}).fetchone()
         return dict(result._mapping) if result else None
-    
-    # Splits table
-def init_db():
-    with engine.begin() as conn:
-        conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS splits (
-            id SERIAL PRIMARY KEY,
-            user_id INT REFERENCES users(id) ON DELETE CASCADE,
-            friend_id INT REFERENCES users(id) ON DELETE CASCADE,
-            amount NUMERIC NOT NULL,
-            description VARCHAR(255),
-            status VARCHAR(20) DEFAULT 'pending'
-        );
-        """))
 
-        # ================= SPLITS =================
+
+# ================= SPLITS =================
 def add_split(user_id, friend_id, amount, description):
-    """Add a new split expense."""
     with engine.begin() as conn:
         conn.execute(
             text("""
@@ -246,21 +261,53 @@ def add_split(user_id, friend_id, amount, description):
         )
 
 def get_splits(user_id):
-    """Get all splits involving this user (both owing and owed)."""
     with engine.begin() as conn:
         result = conn.execute(
-            text("""
-                SELECT * FROM splits
-                WHERE user_id = :uid OR friend_id = :uid
-            """),
+            text("SELECT * FROM splits WHERE user_id = :uid OR friend_id = :uid"),
             {"uid": user_id}
         ).fetchall()
         return [dict(r._mapping) for r in result]
 
 def settle_split(split_id):
-    """Mark a split as settled."""
     with engine.begin() as conn:
-        conn.execute(
-            text("UPDATE splits SET status = 'settled' WHERE id = :sid"),
-            {"sid": split_id}
-        )
+        conn.execute(text("UPDATE splits SET status = 'settled' WHERE id = :sid"),
+                     {"sid": split_id})
+
+
+# ================= RESET TOKENS =================
+
+
+
+def create_reset_token(user_id, token, expiry_minutes=60):
+    expires_at = datetime.datetime.utcnow() + datetime.timedelta(minutes=expiry_minutes)
+    with engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO reset_tokens (user_id, token, expires_at)
+            VALUES (:uid, :tok, :exp)
+        """), {"uid": user_id, "tok": token, "exp": expires_at})
+
+def get_user_by_token(token):
+    """Get user_id from valid reset token."""
+    with engine.begin() as conn:
+        result = conn.execute(text("""
+            SELECT u.id FROM users u
+            JOIN reset_tokens r ON u.id = r.user_id
+            WHERE r.token = :tok AND r.expires_at > NOW()
+        """), {"tok": token}).fetchone()
+        return result[0] if result else None   # ✅ return just user_id
+
+
+def delete_token(token):
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM reset_tokens WHERE token = :tok"), {"tok": token})
+# ================= RESET TOKENS TABLE INIT (optional standalone) =================
+def init_reset_tokens_table():
+    with engine.begin() as conn:
+        conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS reset_tokens (
+            id SERIAL PRIMARY KEY,
+            user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            token VARCHAR(255) UNIQUE NOT NULL,
+            expires_at TIMESTAMP NOT NULL
+        );
+        """))
