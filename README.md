@@ -63,6 +63,9 @@ cp .env.example .env
 DATABASE_URL=postgresql+psycopg2://username:password@host:5432/your_database
 OPENAI_API_KEY=your_openai_api_key_here
 COOKIE_SECRET=your_cookie_secret_here
+SMTP_USER=your_email@gmail.com
+SMTP_PASS=your_app_password
+SMTP_FROM=your_email@gmail.com
 ```
 👉 Generate a secure cookie secret:
 ```
